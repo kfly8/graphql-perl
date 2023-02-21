@@ -9,6 +9,8 @@ use Types::Standard -all;
 use GraphQL::Type::Library -all;
 use MooX::Thunking;
 use GraphQL::MaybeTypeCheck;
+use Scalar::Util ();
+use List::Util ();
 extends qw(GraphQL::Type);
 with qw(
   GraphQL::Role::Output
@@ -108,6 +110,13 @@ method _collect_fields(
   Map[StrNameValid,Bool] $visited_fragments,
 ) {
   DEBUG and _debug('_collect_fields', $self->to_string, $fields_got, $selections);
+
+  my $memo_key = Scalar::Util::refaddr $selections;
+  if (my $memo = $context->{__MEMO__}{ref $self}{_collect_fields}{$memo_key}) {
+    DEBUG and _debug('_collect_fields(memo)', $self->to_string);
+    return @$memo;
+  }
+
   for my $selection (@$selections) {
     my $node = $selection;
     next if !_should_include_node($context->{variable_values}, $node);
@@ -144,7 +153,14 @@ method _collect_fields(
       );
     }
   }
-  ($fields_got, $visited_fragments);
+
+  my @result = ($fields_got, $visited_fragments);
+
+  if (List::Util::all { $_->{kind} eq 'field' } @$selections) {
+    $context->{__MEMO__}{ref $self}{_collect_fields}{$memo_key} = \@result;
+  }
+
+  return @result;
 }
 
 method _fragment_condition_match(

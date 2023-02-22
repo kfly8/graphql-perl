@@ -10,7 +10,6 @@ use GraphQL::Type::Library -all;
 use MooX::Thunking;
 use GraphQL::MaybeTypeCheck;
 use Scalar::Util ();
-use List::Util ();
 extends qw(GraphQL::Type);
 with qw(
   GraphQL::Role::Output
@@ -23,6 +22,7 @@ with qw(
 
 our $VERSION = '0.02';
 use constant DEBUG => $ENV{GRAPHQL_DEBUG};
+use constant MEMO => $ENV{GRAPHQL_MEMO};
 
 =head1 NAME
 
@@ -109,13 +109,45 @@ method _collect_fields(
   FieldsGot $fields_got,
   Map[StrNameValid,Bool] $visited_fragments,
 ) {
+  if (MEMO) {
+    my $memo_key = Scalar::Util::refaddr $selections;
+    if (my $memo = $context->{MEMO()}{$self->name}{_collect_fields}{$memo_key}) {
+      DEBUG and _debug('_collect_fields(memo)', $self->to_string);
+      return @$memo;
+    }
+
+    my ($next_fields_got, $next_visited_fragments, $selections_include_fragment) = $self->__collect_fields(
+      $context,
+      $selections,
+      $fields_got,
+      $visited_fragments,
+    );
+
+    if (!$selections_include_fragment) {
+      $context->{MEMO()}{$self->name}{_collect_fields}{$memo_key} = [$next_fields_got, $next_visited_fragments];
+    }
+
+    return ($next_fields_got, $next_visited_fragments);
+  }
+  else {
+    return $self->__collect_fields(
+      $context,
+      $selections,
+      $fields_got,
+      $visited_fragments,
+    );
+  }
+}
+
+method __collect_fields(
+  HashRef $context,
+  ArrayRef $selections,
+  FieldsGot $fields_got,
+  Map[StrNameValid,Bool] $visited_fragments,
+) {
   DEBUG and _debug('_collect_fields', $self->to_string, $fields_got, $selections);
 
-  my $memo_key = Scalar::Util::refaddr $selections;
-  if (my $memo = $context->{__MEMO__}{ref $self}{_collect_fields}{$memo_key}) {
-    DEBUG and _debug('_collect_fields(memo)', $self->to_string);
-    return @$memo;
-  }
+  my $selections_include_fragment;
 
   for my $selection (@$selections) {
     my $node = $selection;
@@ -130,6 +162,8 @@ method _collect_fields(
       };
       $fields_got = [ $field_names, $nodes_defs ]; # no mutation
     } elsif ($selection->{kind} eq 'inline_fragment') {
+      $selections_include_fragment = 1;
+
       next if !$self->_fragment_condition_match($context, $node);
       ($fields_got, $visited_fragments) = $self->_collect_fields(
         $context,
@@ -138,6 +172,8 @@ method _collect_fields(
         $visited_fragments,
       );
     } elsif ($selection->{kind} eq 'fragment_spread') {
+      $selections_include_fragment = 1;
+
       my $frag_name = $node->{name};
       next if $visited_fragments->{$frag_name};
       $visited_fragments = { %$visited_fragments, $frag_name => 1 }; # !mutate
@@ -154,13 +190,7 @@ method _collect_fields(
     }
   }
 
-  my @result = ($fields_got, $visited_fragments);
-
-  if (List::Util::all { $_->{kind} eq 'field' } @$selections) {
-    $context->{__MEMO__}{ref $self}{_collect_fields}{$memo_key} = \@result;
-  }
-
-  return @result;
+  return ($fields_got, $visited_fragments, $selections_include_fragment);
 }
 
 method _fragment_condition_match(
